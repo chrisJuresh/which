@@ -145,6 +145,12 @@ This reads `which.csv` and `scraped/manifest.sqlite`, writes
   resolve against the local server).
 - **External → untouched.** Non-Which links are left exactly as they are.
 
+Captures are fully-rendered React pages, so their `<script>` tags are dropped
+during publishing. Otherwise the page's own JavaScript re-runs against
+`localhost`, fails to route, and replaces the captured content with a 404
+(also wiping the rewritten links). Removing scripts freezes each capture as a
+static snapshot that displays its content and keeps the rewritten links working.
+
 A rewrite depends on the whole set of scraped URLs, so a full re-pass runs
 automatically whenever that set changes; otherwise only new/changed captures are
 re-published. Useful flags:
@@ -154,6 +160,7 @@ re-published. Useful flags:
 | `--force-rewrite` | Rewrite every capture even if nothing changed. |
 | `--no-rewrite` | Publish captures verbatim (no link changes, no banner). |
 | `--no-banner` | Rewrite links but skip the top archive bar. |
+| `--keep-scripts` | Keep `<script>` tags (captures will re-run and usually 404). |
 
 ## 3. Browse the archive
 

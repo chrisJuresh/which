@@ -395,12 +395,20 @@ def rewrite_capture(
     capture_map: dict[str, str],
     *,
     inject_banner: bool,
+    strip_scripts: bool = True,
 ) -> str:
     lxml_html = import_lxml()
     try:
         doc = lxml_html.fromstring(html)
     except Exception:
         return html  # unparseable capture: publish it unchanged
+    # Captures are fully-rendered React pages. Left intact, the page's own JS
+    # re-runs against localhost, fails to route, and replaces the real content
+    # with a 404 (also wiping our rewritten links). Dropping scripts freezes the
+    # captured DOM as a static snapshot so the content and links survive.
+    if strip_scripts:
+        for element in doc.xpath("//script"):
+            element.drop_tree()
     base_url = str(record.get("finalUrl") or record.get("url") or "")
     for anchor in doc.iter("a"):
         raw_href = (anchor.get("href") or "").strip()
@@ -526,6 +534,7 @@ def publish_captures(
     *,
     rewrite: bool = True,
     banner: bool = True,
+    strip_scripts: bool = True,
     force: bool = False,
 ) -> dict[str, int]:
     """Publish captures into the web app's static tree.
@@ -563,7 +572,14 @@ def publish_captures(
                 ):
                     content = src.read_text(encoding="utf-8", errors="replace")
                     _write_text_atomic(
-                        dest, rewrite_capture(content, record, capture_map, inject_banner=banner)
+                        dest,
+                        rewrite_capture(
+                            content,
+                            record,
+                            capture_map,
+                            inject_banner=banner,
+                            strip_scripts=strip_scripts,
+                        ),
                     )
                     stats["rewritten"] += 1
                 else:
@@ -618,6 +634,7 @@ def export_data(args: argparse.Namespace) -> int:
         args.static_root,
         rewrite=not args.no_rewrite,
         banner=not args.no_banner,
+        strip_scripts=not args.keep_scripts,
         force=args.force_rewrite,
     )
     mode = "verbatim copy" if args.no_rewrite else "link-rewritten"
@@ -644,6 +661,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-banner",
         action="store_true",
         help="Do not inject the archive navigation bar into captures.",
+    )
+    parser.add_argument(
+        "--keep-scripts",
+        action="store_true",
+        help="Keep <script> tags in captures (they will re-run and usually 404).",
     )
     parser.add_argument(
         "--force-rewrite",
