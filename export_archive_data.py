@@ -225,12 +225,45 @@ def stable_id(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
 
 
+# Card metadata (title/description/image) is expensive to parse for every
+# capture, so it is cached by relative path + file signature. Repeat exports
+# only re-parse captures whose source file actually changed.
+_META_CACHE: dict[str, dict[str, str]] = {}
+_META_FIELDS = ("title", "description", "image")
+
+
+def load_meta_cache(out_dir: Path) -> None:
+    global _META_CACHE
+    path = out_dir / ".meta-cache.json"
+    if path.exists():
+        with suppress(Exception):
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                _META_CACHE = loaded
+
+
+def save_meta_cache(out_dir: Path) -> None:
+    with suppress(Exception):
+        (out_dir / ".meta-cache.json").write_text(
+            json.dumps(_META_CACHE), encoding="utf-8"
+        )
+
+
 def extract_raw_metadata(root: Path, row: sqlite3.Row | None) -> dict[str, str]:
     if row is None:
         return {}
-    raw_path = path_from_rel(root, row["raw_html_path"])
+    rel = str(row["raw_html_path"] or "")
+    raw_path = path_from_rel(root, rel)
     if raw_path is None or not raw_path.exists():
         return {}
+    try:
+        stat = raw_path.stat()
+        signature = f"{int(stat.st_mtime)}:{stat.st_size}"
+    except OSError:
+        signature = ""
+    cached = _META_CACHE.get(rel)
+    if signature and cached and cached.get("sig") == signature:
+        return {field: cached[field] for field in _META_FIELDS if cached.get(field)}
     data: dict[str, str] = {}
     with suppress(Exception):
         BeautifulSoup = import_bs4()
@@ -261,6 +294,8 @@ def extract_raw_metadata(root: Path, row: sqlite3.Row | None) -> dict[str, str]:
                     continue
                 data[key] = value
                 break
+    if signature:
+        _META_CACHE[rel] = {"sig": signature, **data}
     return data
 
 
@@ -546,10 +581,12 @@ def write_json_atomic(target: Path, payload: dict[str, Any]) -> None:
 def export_data(args: argparse.Namespace) -> int:
     urls = read_urls(args.csv)
     db_rows = load_db_rows(args.out / "manifest.sqlite")
+    load_meta_cache(args.out)
     records = [
         page_record(index, url, db_rows.get(url), args.out)
         for index, url in enumerate(urls, start=1)
     ]
+    save_meta_cache(args.out)
     payload = {
         "generatedAt": utc_now(),
         "sourceCsv": str(args.csv),
