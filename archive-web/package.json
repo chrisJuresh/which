@@ -1,0 +1,24 @@
+{
+  "name": "which-archive-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "export:data": "uv run python ../export_archive_data.py",
+    "dev": "npm run export:data && vite dev",
+    "serve": "vite dev --port 5173 --strictPort",
+    "build": "npm run export:data && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "latest",
+    "@sveltejs/kit": "latest",
+    "@sveltejs/vite-plugin-svelte": "latest",
+    "svelte": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "dependencies": {
+    "@lucide/svelte": "^1.23.0"
+  }
+}
