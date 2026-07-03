@@ -92,12 +92,48 @@ def read_urls(csv_path: Path) -> list[str]:
     return urls
 
 
-def import_bs4() -> Any:
+def import_lxml() -> Any:
     try:
-        from bs4 import BeautifulSoup
+        import lxml.html as lxml_html
     except ImportError as exc:
         raise RuntimeError("Install dependencies first: uv pip install -r requirements.txt") from exc
-    return BeautifulSoup
+    return lxml_html
+
+
+# Metadata is read straight from the parsed tree with XPath (fast), in priority
+# order per field.
+_META_XPATHS = {
+    "title": ['//meta[@property="og:title"]/@content', "//title", "(//h1)[1]"],
+    "description": [
+        '//meta[@name="description"]/@content',
+        '//meta[@property="og:description"]/@content',
+    ],
+    "image": [
+        '//meta[@property="og:image"]/@content',
+        '//meta[@name="twitter:image"]/@content',
+        '//link[@rel="image_src"]/@href',
+        "(//img[@src])[1]/@src",
+    ],
+}
+
+
+def _first_value(doc: Any, xpaths: list[str]) -> str:
+    for xpath in xpaths:
+        for node in doc.xpath(xpath):
+            value = node if isinstance(node, str) else node.text_content()
+            value = re.sub(r"\s+", " ", value or "").strip()
+            if value and not value.startswith("data:"):
+                return value
+    return ""
+
+
+def extract_meta_from_doc(doc: Any) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for key, xpaths in _META_XPATHS.items():
+        value = _first_value(doc, xpaths)
+        if value:
+            result[key] = value
+    return result
 
 
 def path_from_rel(root: Path, value: str | None) -> Path | None:
@@ -266,34 +302,9 @@ def extract_raw_metadata(root: Path, row: sqlite3.Row | None) -> dict[str, str]:
         return {field: cached[field] for field in _META_FIELDS if cached.get(field)}
     data: dict[str, str] = {}
     with suppress(Exception):
-        BeautifulSoup = import_bs4()
-        soup = BeautifulSoup(raw_path.read_text(encoding="utf-8", errors="replace"), "html.parser")
-        for key, selectors in {
-            "title": [
-                ('meta[property="og:title"]', "content"),
-                ("title", None),
-                ("h1", None),
-            ],
-            "description": [
-                ('meta[name="description"]', "content"),
-                ('meta[property="og:description"]', "content"),
-            ],
-            "image": [
-                ('meta[property="og:image"]', "content"),
-                ('meta[name="twitter:image"]', "content"),
-                ('link[rel="image_src"]', "href"),
-                ("img[src]", "src"),
-            ],
-        }.items():
-            for selector, attr in selectors:
-                tag = soup.select_one(selector)
-                if not tag:
-                    continue
-                value = str(tag.get(attr, "") if attr else tag.get_text(" ", strip=True)).strip()
-                if not value or value.startswith("data:"):
-                    continue
-                data[key] = value
-                break
+        lxml_html = import_lxml()
+        doc = lxml_html.fromstring(raw_path.read_text(encoding="utf-8", errors="replace"))
+        data = extract_meta_from_doc(doc)
     if signature:
         _META_CACHE[rel] = {"sig": signature, **data}
     return data
@@ -385,10 +396,13 @@ def rewrite_capture(
     *,
     inject_banner: bool,
 ) -> str:
-    BeautifulSoup = import_bs4()
-    soup = BeautifulSoup(html, "html.parser")
+    lxml_html = import_lxml()
+    try:
+        doc = lxml_html.fromstring(html)
+    except Exception:
+        return html  # unparseable capture: publish it unchanged
     base_url = str(record.get("finalUrl") or record.get("url") or "")
-    for anchor in soup.find_all("a", href=True):
+    for anchor in doc.iter("a"):
         raw_href = (anchor.get("href") or "").strip()
         if not raw_href or raw_href.lower().startswith(SKIP_HREF_PREFIXES):
             continue
@@ -401,15 +415,18 @@ def rewrite_capture(
             continue
         local = capture_map.get(canonical_key(absolute))
         if local:
-            anchor["href"] = f"{local}#{parts.fragment}" if parts.fragment else local
-            anchor["data-archive"] = "local"
+            anchor.set("href", f"{local}#{parts.fragment}" if parts.fragment else local)
+            anchor.set("data-archive", "local")
         elif is_which_host(parts.netloc):
-            anchor["href"] = absolute
-            anchor["data-archive"] = "live"
+            anchor.set("href", absolute)
+            anchor.set("data-archive", "live")
         # external anchors are intentionally left untouched
-    if inject_banner and soup.body is not None and not soup.find(id="which-archive-bar"):
-        soup.body.insert(0, BeautifulSoup(archive_banner_html(record), "html.parser"))
-    return str(soup)
+    if inject_banner and not doc.xpath('boolean(//*[@id="which-archive-bar"])'):
+        body = doc.find(".//body")
+        if body is not None:
+            with suppress(Exception):
+                body.insert(0, lxml_html.fragment_fromstring(archive_banner_html(record)))
+    return lxml_html.tostring(doc, encoding="unicode", doctype="<!DOCTYPE html>")
 
 
 def _read_rewrite_signature(state_path: Path) -> str:
