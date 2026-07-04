@@ -34,10 +34,19 @@ docker compose up -d
 
 ## Updating the archive data (after a new scrape, run locally)
 
-Re-run the pipeline, then copy the refreshed data up:
+**PowerShell (recommended on Windows):**
+
+```powershell
+./scripts/sync-data.ps1        # re-exports, then uploads captures + archive.json
+```
+
+Do **not** use `tar czf - | ssh` in PowerShell — PowerShell re-encodes the binary
+pipe and corrupts it (`gzip: stdin: not in gzip format`). The script packs a
+temp tarball and copies it with `scp` instead. In a real POSIX shell (Git Bash /
+WSL) the streamed pipe is fine:
 
 ```bash
-# on the PC, from the project root, after: python export_archive_data.py
+uv run python export_archive_data.py
 tar czf - -C archive-web/static/captures raw-html | \
   ssh -p 22222 chris@REDACTED-IP 'tar xzf - -C /srv/which/captures'
 scp -P 22222 archive-web/static/data/archive.json chris@REDACTED-IP:/srv/which/data/
