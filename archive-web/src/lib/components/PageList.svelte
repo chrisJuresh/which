@@ -7,18 +7,24 @@
 
   export let pages: ArchivePage[] = [];
   export let initialQuery = '';
+  export let initialType = 'All types';
   export let showControls = true;
 
   let query = initialQuery;
   let mode: ViewMode = 'all';
-  let typeFilter = 'All types';
+  let typeFilter = initialType;
   let limit = 60;
 
-  // keep the box in sync when the parent changes the incoming query (e.g. nav)
+  // keep controls in sync when the parent changes the incoming query/type (nav)
   let lastInit = initialQuery;
   $: if (initialQuery !== lastInit) {
     lastInit = initialQuery;
     query = initialQuery;
+  }
+  let lastInitType = initialType;
+  $: if (initialType !== lastInitType) {
+    lastInitType = initialType;
+    typeFilter = initialType;
   }
 
   $: typeOptions = ['All types', ...Array.from(new Set(pages.map((p) => p.type))).sort()];

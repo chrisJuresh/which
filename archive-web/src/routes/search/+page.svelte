@@ -6,18 +6,25 @@
   export let data: PageData;
   $: index = data.archive!;
   $: q = $pageStore.url.searchParams.get('q') ?? '';
+  $: type = $pageStore.url.searchParams.get('type') ?? 'All types';
+
+  $: heading = q
+    ? `Results for “${q}”`
+    : type !== 'All types'
+      ? type
+      : 'Search the archive';
 </script>
 
 <svelte:head>
-  <title>{q ? `Search: ${q}` : 'Search'} · Which Archive</title>
+  <title>{q || (type !== 'All types' ? type : 'Search')} · Which Archive</title>
 </svelte:head>
 
 <div class="page container">
-  <p class="eyebrow">Search</p>
-  <h1>{q ? `Results for “${q}”` : 'Search the archive'}</h1>
+  <p class="eyebrow">{type !== 'All types' && !q ? 'Browse by type' : 'Search'}</p>
+  <h1>{heading}</h1>
   <p class="muted lead">Filter across all {index.data.summary.total.toLocaleString()} pages.</p>
 
-  <PageList pages={index.data.pages} initialQuery={q} />
+  <PageList pages={index.data.pages} initialQuery={q} initialType={type} />
 </div>
 
 <style>
