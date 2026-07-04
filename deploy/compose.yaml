@@ -37,7 +37,9 @@ services:
   # Auto-pulls new images pushed by CI. Scoped so it only touches this stack,
   # never the rest of the homelab (jellyfin, scrutiny, ...).
   watchtower:
-    image: containrrr/watchtower
+    # containrrr/watchtower is unmaintained and its Docker API client (1.25) is
+    # too old for Docker 29 (needs >=1.44); use the maintained fork.
+    image: nickfedor/watchtower:latest
     restart: unless-stopped
     command: --interval 120 --cleanup --scope which --label-enable
     volumes:

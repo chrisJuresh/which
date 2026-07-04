@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from html import escape as html_escape
@@ -523,8 +524,21 @@ def publish_file(src: Path, dest: Path) -> bool:
 def _write_text_atomic(dest: Path, text: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_suffix(dest.suffix + ".partial")
-    partial.write_text(text, encoding="utf-8")
-    partial.replace(dest)
+    # Windows antivirus/search indexers briefly lock freshly-written files,
+    # which surfaces as PermissionError on write or replace. Retry a few times
+    # before giving up so one transient lock can't abort the whole run.
+    last_error: Exception | None = None
+    for attempt in range(6):
+        try:
+            partial.write_text(text, encoding="utf-8")
+            partial.replace(dest)
+            return
+        except PermissionError as error:
+            last_error = error
+            with suppress(Exception):
+                partial.unlink()
+            time.sleep(0.5 * (attempt + 1))
+    raise last_error  # type: ignore[misc]
 
 
 def publish_captures(
@@ -553,7 +567,7 @@ def publish_captures(
     )
     state_path = captures_root / ".rewrite-state.json"
     full_pass = force or (rewrite and signature != _read_rewrite_signature(state_path))
-    stats = {"rewritten": 0, "copied": 0, "skipped": 0}
+    stats = {"rewritten": 0, "copied": 0, "skipped": 0, "failed": 0}
     total_raw = sum(1 for r in records if r.get("rawHtmlPath"))
     done = 0
 
@@ -570,18 +584,23 @@ def publish_captures(
                     or not dest.exists()
                     or src.stat().st_mtime > dest.stat().st_mtime
                 ):
-                    content = src.read_text(encoding="utf-8", errors="replace")
-                    _write_text_atomic(
-                        dest,
-                        rewrite_capture(
-                            content,
-                            record,
-                            capture_map,
-                            inject_banner=banner,
-                            strip_scripts=strip_scripts,
-                        ),
-                    )
-                    stats["rewritten"] += 1
+                    try:
+                        content = src.read_text(encoding="utf-8", errors="replace")
+                        _write_text_atomic(
+                            dest,
+                            rewrite_capture(
+                                content,
+                                record,
+                                capture_map,
+                                inject_banner=banner,
+                                strip_scripts=strip_scripts,
+                            ),
+                        )
+                        stats["rewritten"] += 1
+                    except OSError as error:
+                        # keep going; report the stragglers at the end
+                        stats["failed"] += 1
+                        print(f"  ! could not publish {dest.name}: {error}", flush=True)
                 else:
                     stats["skipped"] += 1
             done += 1
@@ -640,10 +659,13 @@ def export_data(args: argparse.Namespace) -> int:
     mode = "verbatim copy" if args.no_rewrite else "link-rewritten"
     print(
         f"Captures ({mode}): {stats['rewritten']:,} written, "
-        f"{stats['copied']:,} copied, {stats['skipped']:,} unchanged "
+        f"{stats['copied']:,} copied, {stats['skipped']:,} unchanged, "
+        f"{stats['failed']:,} failed "
         f"under {args.static_root / 'captures'}"
     )
-    return 0
+    if stats["failed"]:
+        print(f"WARNING: {stats['failed']:,} capture(s) could not be written; re-run to retry.")
+    return int(bool(stats["failed"]))
 
 
 def build_parser() -> argparse.ArgumentParser:
