@@ -1098,7 +1098,9 @@ def scrape_one(conn: sqlite3.Connection, p: Paths, row: sqlite3.Row, page: Any, 
         conn,
         int(row["id"]),
         "downloaded",
-        error=f"MHTML capture failed: {mhtml_error}" if mhtml_error else None,
+        # A failed MHTML snapshot is not a page error — the raw HTML captured fine.
+        # The reason is kept in the page's metadata sidecar and printed above.
+        error=None,
         http_status=int(response.status),
         final_url=final_url,
         title=title,
