@@ -231,12 +231,13 @@ def init_db(p: Paths) -> sqlite3.Connection:
 
 
 def import_manifest(conn: sqlite3.Connection, csv_path: Path) -> int:
+    """Upsert the CSV URLs into the manifest. This is purely ADDITIVE: pages are
+    never deleted here. Removing a URL from which.csv leaves its row and captures
+    intact (it just stops appearing in the catalogue), so swapping in a new CSV
+    can never lose scraped pages."""
     urls = read_urls(csv_path)
     now = utc_now()
     with conn:
-        conn.execute("CREATE TEMP TABLE IF NOT EXISTS current_manifest(url TEXT PRIMARY KEY)")
-        conn.execute("DELETE FROM current_manifest")
-        conn.executemany("INSERT INTO current_manifest(url) VALUES(?)", [(url,) for url in urls])
         for index, url in enumerate(urls, start=1):
             conn.execute(
                 """
@@ -251,16 +252,6 @@ def import_manifest(conn: sqlite3.Connection, csv_path: Path) -> int:
                 """,
                 (index, url, url, slug_for_url(url), now),
             )
-        # Prune only CSV-seeded pages that left the manifest; keep pages we
-        # discovered ourselves (paginated versions), which are never in the CSV.
-        conn.execute(
-            """
-            DELETE FROM pages
-            WHERE source='csv' AND NOT EXISTS(
-                SELECT 1 FROM current_manifest WHERE current_manifest.url=pages.canonical_url
-            )
-            """
-        )
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('csv_sha256', ?)",
             (hashlib.sha256(csv_path.read_bytes()).hexdigest(),),
@@ -952,15 +943,52 @@ def extract_pagination_urls_from_html(html: str, base_url: str) -> list[str]:
     return list(out)[:500]
 
 
+PAGINATION_MAX_PAGES = 500  # sanity cap; no Which listing is anywhere near this
+
+
+def has_page_param(url: str) -> bool:
+    return "page" in parse_qs(urlsplit(url).query)
+
+
+def paginated_series_urls(base_url: str, page_link_urls: list[str]) -> list[str]:
+    """From the ?page=N links a first page renders, return the bounded, complete
+    series base?page=2 .. base?page=MAX. Which's nav is windowed (it may skip
+    middle pages) but shows a jump to the last page, so we take the highest page
+    number as the total and enumerate the whole range. This is what stops the
+    runaway: out-of-range pages keep offering a "next" link, so we NEVER trust
+    them — only the first page's max, capped."""
+    max_n = 0
+    for raw in page_link_urls:
+        value = (parse_qs(urlsplit(raw).query).get("page") or [None])[0]
+        if value and re.fullmatch(r"[0-9]+", value):
+            max_n = max(max_n, int(value))
+    max_n = min(max_n, PAGINATION_MAX_PAGES)
+    if max_n < 2:
+        return []
+    parts = urlsplit(base_url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "page"]
+    urls: list[str] = []
+    for n in range(2, max_n + 1):
+        query = urlencode([*kept, ("page", str(n))])
+        urls.append(urlunsplit((parts.scheme, parts.netloc, parts.path, query, "")))
+    return urls
+
+
 def enqueue_pagination(conn: sqlite3.Connection, page: Any, row: sqlite3.Row) -> int:
-    """Discover paginated versions of the just-captured listing (live) and queue them."""
+    """Discover the pagination series from a just-captured FIRST page (live) and
+    queue the whole bounded range. Only first pages trigger discovery, so there
+    is no unbounded chaining through ?page= pages."""
+    base = str(row["canonical_url"])
+    if has_page_param(base):
+        return 0
     try:
         links = page.evaluate(PAGINATION_EXTRACT_JS)
     except Exception:
         return 0
-    if not links:
+    urls = paginated_series_urls(base, links or [])
+    if not urls:
         return 0
-    return queue_pagination_urls(conn, links, str(row["canonical_url"]), int(row["input_order"]))
+    return queue_pagination_urls(conn, urls, base, int(row["input_order"]))
 
 
 def scrape_one(conn: sqlite3.Connection, p: Paths, row: sqlite3.Row, page: Any, args: argparse.Namespace) -> None:
@@ -1312,6 +1340,9 @@ def discover(args: argparse.Namespace) -> int:
     scanned = 0
     added = 0
     for row in rows:
+        base = str(row["canonical_url"])
+        if has_page_param(base):
+            continue  # only first pages define a series
         capture = p.out / str(row["raw_html_path"])
         if not capture.exists():
             continue
@@ -1325,11 +1356,10 @@ def discover(args: argparse.Namespace) -> int:
             continue
         scanned += 1
         html = data.decode("utf-8", "replace")
-        urls = extract_pagination_urls_from_html(html, str(row["canonical_url"]))
+        links = extract_pagination_urls_from_html(html, base)
+        urls = paginated_series_urls(base, links)
         if urls:
-            added += queue_pagination_urls(
-                conn, urls, str(row["canonical_url"]), int(row["input_order"])
-            )
+            added += queue_pagination_urls(conn, urls, base, int(row["input_order"]))
     conn.close()
     print(f"Scanned {scanned:,} listing capture(s) with pagination; queued {added:,} new page(s).")
     print("Now run: uv run python scraper.py scrape   (deeper pages are found as it fetches)")
