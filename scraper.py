@@ -875,7 +875,7 @@ def mark_in_progress(conn: sqlite3.Connection, row_id: int) -> None:
 # path; there is no rel="next". This pulls every same-path page link the page
 # actually rendered, so following the chain (each page reveals its neighbours)
 # reaches the whole series without ever guessing a page count.
-PAGINATION_EXTRACT_JS = """
+PAGINATION_EXTRACT_JS = r"""
 () => {
   const here = new URL(location.href);
   const out = new Set();
@@ -883,7 +883,7 @@ PAGINATION_EXTRACT_JS = """
     let u;
     try { u = new URL(a.getAttribute('href'), location.href); } catch (e) { continue; }
     if (u.hostname !== here.hostname) continue;
-    if (u.pathname !== here.pathname) continue;
+    if (u.pathname.replace(/\/+$/, '') !== here.pathname.replace(/\/+$/, '')) continue;
     const pg = u.searchParams.get('page');
     if (!pg || !/^[0-9]+$/.test(pg) || parseInt(pg, 10) < 2) continue;
     out.add(u.toString());
@@ -945,7 +945,9 @@ def extract_pagination_urls_from_html(html: str, base_url: str) -> list[str]:
         if (parts.path or "").rstrip("/") != (here.path or "").rstrip("/"):
             continue
         page_value = (parse_qs(parts.query).get("page") or [None])[0]
-        if page_value and page_value.isdigit() and int(page_value) >= 2:
+        # ASCII digits only, matching the JS /^[0-9]+$/ (str.isdigit() also accepts
+        # Unicode digits like "²" that int() would choke on).
+        if page_value and re.fullmatch(r"[0-9]+", page_value) and int(page_value) >= 2:
             out.add(absolute)
     return list(out)[:500]
 
