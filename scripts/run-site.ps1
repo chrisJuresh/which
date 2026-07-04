@@ -14,6 +14,9 @@
 .PARAMETER Port
   Dev server port (default 5173).
 
+.PARAMETER NoOpen
+  Do not open a browser window automatically.
+
 .EXAMPLE
   ./scripts/run-site.ps1            # start (exports data only if missing)
 
@@ -23,6 +26,7 @@
 [CmdletBinding()]
 param(
   [switch]$Refresh,
+  [switch]$NoOpen,
   [int]$Port = 5173
 )
 
@@ -67,9 +71,12 @@ if ($Refresh -or -not (Test-Path $dataFile)) {
 
 # --- Start the site -----------------------------------------------------
 Write-Host "Starting dev server on http://localhost:$Port ..." -ForegroundColor Green
+Write-Host "Press Ctrl+C or close this window to stop." -ForegroundColor DarkGray
+$viteArgs = @('vite', 'dev', '--port', $Port)
+if (-not $NoOpen) { $viteArgs += '--open' }
 Push-Location archive-web
 try {
-  npx vite dev --port $Port --open
+  npx @viteArgs
 } finally {
   Pop-Location
 }

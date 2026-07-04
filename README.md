@@ -22,22 +22,22 @@ only on the published copies under `archive-web/static/captures/`.
 
 ## Quick start — view the website
 
-From the project root, in PowerShell:
+**Just double-click `Start Which Archive.bat`.** It installs anything missing,
+builds the data on the first run, and opens the site at
+<http://localhost:5173>. Keep the window open while you browse; close it (or
+press Ctrl+C) to stop.
+
+After a **new scrape**, double-click **`Refresh Data and Start.bat`** instead —
+it rebuilds the data and rewrites captures first, then opens the site.
+
+Prefer the terminal? From the project root in PowerShell:
 
 ```powershell
-./scripts/run-site.ps1
+./scripts/run-site.ps1            # start (exports data only if missing)
+./scripts/run-site.ps1 -Refresh   # rebuild data after a scrape, then start
 ```
 
-That installs dependencies if needed, exports the data + rewrites captures the
-first time, and opens the site at <http://localhost:5173>.
-
-After a **new scrape**, refresh the data before viewing:
-
-```powershell
-./scripts/run-site.ps1 -Refresh
-```
-
-Prefer to run it by hand? See [Manual setup](#manual-setup) below.
+See [Manual setup](#manual-setup) for the step-by-step.
 
 ---
 
