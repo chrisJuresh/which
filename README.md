@@ -106,6 +106,22 @@ The scraper:
 - respects `Retry-After` when present
 - targets about 5 seconds per page by default, and only waits when running ahead
 - saves raw rendered HTML for each page and attempts an MHTML snapshot for fidelity
+- **discovers pagination**: when a listing links to `?page=2`, `?page=3`, … those
+  pages are queued and captured too (chained until the whole series is covered),
+  tagged `source=pagination` so they survive `which.csv` changes
+
+### Paginated listings
+
+Which paginates listings with a `?page=N` query parameter. New scrapes pick these
+up automatically. To backfill pagination for pages captured **before** this
+support existed, run the one-time discovery pass (offline, no re-fetch), then scrape:
+
+```powershell
+uv run python scraper.py discover   # queues ?page=N versions from existing captures
+uv run python scraper.py scrape     # fetches them; deeper pages are found as it goes
+```
+
+Use `scrape --no-pagination` to disable discovery for a run.
 
 If the login expires mid-run, the current URL stays pending and the scraper
 alerts loudly (terminal bell, banner, `scraped/LOGIN_REQUIRED.txt`, and a

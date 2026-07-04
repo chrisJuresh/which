@@ -630,6 +630,28 @@ def write_json_atomic(target: Path, payload: dict[str, Any]) -> None:
     partial.replace(target)
 
 
+def capture_only_record(row: sqlite3.Row, out_dir: Path) -> dict[str, Any]:
+    """Minimal record for a published-but-not-catalogued capture (e.g. a paginated
+    listing page). Enough for the rewrite map, publishing, and the archive banner —
+    no metadata parsing needed."""
+    url = str(row["canonical_url"])
+    raw = str(row["raw_html_path"] or "")
+    mhtml = str(row["mhtml_path"] or "")
+    has_raw = bool(raw and (out_dir / Path(raw)).exists())
+    has_mhtml = bool(mhtml and (out_dir / Path(mhtml)).exists())
+    return {
+        "url": url,
+        "finalUrl": str(row["final_url"] or url),
+        "status": str(row["status"]),
+        "title": clean_title(str(row["title"] or "")) or page_label_from_url(url),
+        "fetchedAt": str(row["fetched_at"] or ""),
+        "rawHtmlPath": raw,
+        "mhtmlPath": mhtml,
+        "localHtmlUrl": capture_url(raw) if has_raw else "",
+        "localMhtmlUrl": capture_url(mhtml) if has_mhtml else "",
+    }
+
+
 def export_data(args: argparse.Namespace) -> int:
     urls = read_urls(args.csv)
     db_rows = load_db_rows(args.out / "manifest.sqlite")
@@ -639,6 +661,15 @@ def export_data(args: argparse.Namespace) -> int:
         for index, url in enumerate(urls, start=1)
     ]
     save_meta_cache(args.out)
+    # Pages we discovered (paginated ?page=N listings) are not in the CSV catalogue,
+    # but their captures must be published and added to the rewrite map so that
+    # pagination links inside archived pages resolve to local copies.
+    csv_keys = {canonical_key(url) for url in urls}
+    extra_records = [
+        capture_only_record(row, args.out)
+        for key, row in db_rows.items()
+        if key not in csv_keys and str(row["status"]) == "downloaded"
+    ]
     payload = {
         "generatedAt": utc_now(),
         "sourceCsv": str(args.csv),
@@ -646,9 +677,10 @@ def export_data(args: argparse.Namespace) -> int:
         "pages": records,
     }
     write_json_atomic(args.target, payload)
-    print(f"Exported {len(records):,} page record(s) to {args.target}")
+    extra_note = f" (+{len(extra_records):,} discovered captures)" if extra_records else ""
+    print(f"Exported {len(records):,} page record(s){extra_note} to {args.target}")
     stats = publish_captures(
-        records,
+        records + extra_records,
         args.out,
         args.static_root,
         rewrite=not args.no_rewrite,

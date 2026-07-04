@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 
 ROOT = Path(__file__).resolve().parent
@@ -25,7 +25,7 @@ AUTH_STATE_NAME = "auth-state.json"
 WHICH_HOST = "www.which.co.uk"
 WHICH_ROOT_DOMAIN = "which.co.uk"
 AUTH_HOST = "auth.which.co.uk"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_TARGET_SECONDS_PER_PAGE = 5.0
 
 COOKIE_HINTS = (
@@ -212,11 +212,19 @@ def init_db(p: Paths) -> sqlite3.Connection:
             fetched_at TEXT,
             updated_at TEXT NOT NULL,
             error TEXT,
-            retry_after_until TEXT
+            retry_after_until TEXT,
+            source TEXT NOT NULL DEFAULT 'csv',
+            discovered_from TEXT
         )
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pages_status ON pages(status)")
+    # Migrate older DBs that predate the pagination-discovery columns.
+    existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
+    if "source" not in existing_columns:
+        conn.execute("ALTER TABLE pages ADD COLUMN source TEXT NOT NULL DEFAULT 'csv'")
+    if "discovered_from" not in existing_columns:
+        conn.execute("ALTER TABLE pages ADD COLUMN discovered_from TEXT")
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
     conn.commit()
     return conn
@@ -232,20 +240,23 @@ def import_manifest(conn: sqlite3.Connection, csv_path: Path) -> int:
         for index, url in enumerate(urls, start=1):
             conn.execute(
                 """
-                INSERT INTO pages(input_order, url, canonical_url, slug, status, updated_at)
-                VALUES(?, ?, ?, ?, 'pending', ?)
+                INSERT INTO pages(input_order, url, canonical_url, slug, status, source, updated_at)
+                VALUES(?, ?, ?, ?, 'pending', 'csv', ?)
                 ON CONFLICT(canonical_url) DO UPDATE SET
                     input_order=excluded.input_order,
                     url=excluded.url,
                     slug=excluded.slug,
+                    source='csv',
                     updated_at=excluded.updated_at
                 """,
                 (index, url, url, slug_for_url(url), now),
             )
+        # Prune only CSV-seeded pages that left the manifest; keep pages we
+        # discovered ourselves (paginated versions), which are never in the CSV.
         conn.execute(
             """
             DELETE FROM pages
-            WHERE NOT EXISTS(
+            WHERE source='csv' AND NOT EXISTS(
                 SELECT 1 FROM current_manifest WHERE current_manifest.url=pages.canonical_url
             )
             """
@@ -860,6 +871,96 @@ def mark_in_progress(conn: sqlite3.Connection, row_id: int) -> None:
         )
 
 
+# Which paginates listings with a `?page=N` query param (N>=2) on the same
+# path; there is no rel="next". This pulls every same-path page link the page
+# actually rendered, so following the chain (each page reveals its neighbours)
+# reaches the whole series without ever guessing a page count.
+PAGINATION_EXTRACT_JS = """
+() => {
+  const here = new URL(location.href);
+  const out = new Set();
+  for (const a of document.querySelectorAll('a[href]')) {
+    let u;
+    try { u = new URL(a.getAttribute('href'), location.href); } catch (e) { continue; }
+    if (u.hostname !== here.hostname) continue;
+    if (u.pathname !== here.pathname) continue;
+    const pg = u.searchParams.get('page');
+    if (!pg || !/^[0-9]+$/.test(pg) || parseInt(pg, 10) < 2) continue;
+    out.add(u.toString());
+  }
+  return Array.from(out).slice(0, 500);
+}
+"""
+
+
+def queue_pagination_urls(
+    conn: sqlite3.Connection, urls: list[str], parent_key: str, parent_order: int
+) -> int:
+    """Insert not-yet-known paginated URLs as pending, tagged as discovered."""
+    now = utc_now()
+    added = 0
+    with conn:
+        for raw in urls:
+            key = canonical_key(raw)
+            if not key or key == parent_key:
+                continue
+            if not is_which_content_host((urlsplit(key).hostname or "").lower()):
+                continue
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO pages(
+                    input_order, url, canonical_url, slug, status, source, discovered_from, updated_at
+                )
+                VALUES(?, ?, ?, ?, 'pending', 'pagination', ?, ?)
+                """,
+                (parent_order, key, key, slug_for_url(key), parent_key, now),
+            )
+            added += cursor.rowcount
+    return added
+
+
+def extract_pagination_urls_from_html(html: str, base_url: str) -> list[str]:
+    """Offline mirror of PAGINATION_EXTRACT_JS: same-path ?page=N (N>=2) links."""
+    try:
+        import lxml.html as lxml_html
+    except ImportError:
+        return []
+    try:
+        doc = lxml_html.fromstring(html)
+    except Exception:
+        return []
+    here = urlsplit(base_url)
+    out: set[str] = set()
+    for anchor in doc.iter("a"):
+        href = anchor.get("href")
+        if not href:
+            continue
+        try:
+            absolute = urljoin(base_url, href)
+        except ValueError:
+            continue
+        parts = urlsplit(absolute)
+        if (parts.hostname or "").lower() != (here.hostname or "").lower():
+            continue
+        if (parts.path or "").rstrip("/") != (here.path or "").rstrip("/"):
+            continue
+        page_value = (parse_qs(parts.query).get("page") or [None])[0]
+        if page_value and page_value.isdigit() and int(page_value) >= 2:
+            out.add(absolute)
+    return list(out)[:500]
+
+
+def enqueue_pagination(conn: sqlite3.Connection, page: Any, row: sqlite3.Row) -> int:
+    """Discover paginated versions of the just-captured listing (live) and queue them."""
+    try:
+        links = page.evaluate(PAGINATION_EXTRACT_JS)
+    except Exception:
+        return 0
+    if not links:
+        return 0
+    return queue_pagination_urls(conn, links, str(row["canonical_url"]), int(row["input_order"]))
+
+
 def scrape_one(conn: sqlite3.Connection, p: Paths, row: sqlite3.Row, page: Any, args: argparse.Namespace) -> None:
     url = str(row["canonical_url"])
     raw_path, mhtml_path, meta_path = page_output_paths(p, row)
@@ -977,6 +1078,12 @@ def scrape_one(conn: sqlite3.Connection, p: Paths, row: sqlite3.Row, page: Any, 
             "fetched_at": fetched_at,
         },
     )
+
+    if not getattr(args, "no_pagination", False):
+        with suppress(Exception):
+            added = enqueue_pagination(conn, page, row)
+            if added:
+                print(f"  + queued {added} more paginated page(s) from this listing")
 
 
 def selectable_rows(conn: sqlite3.Connection, limit: int | None, retry_failed: bool) -> list[sqlite3.Row]:
@@ -1188,6 +1295,39 @@ def reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def discover(args: argparse.Namespace) -> int:
+    """One-time backfill: read already-downloaded listing captures and queue their
+    paginated (?page=N) versions as pending, so a later 'scrape' fetches them.
+    Ongoing scrapes discover pagination live, so this is only needed for pages
+    that were captured before pagination support existed."""
+    p = paths(args.out)
+    conn = init_db(p)
+    import_manifest(conn, args.csv)
+    rows = conn.execute(
+        "SELECT canonical_url, raw_html_path, input_order FROM pages "
+        "WHERE status='downloaded' AND raw_html_path IS NOT NULL"
+    ).fetchall()
+    scanned = 0
+    added = 0
+    for row in rows:
+        capture = p.out / str(row["raw_html_path"])
+        if not capture.exists():
+            continue
+        html = capture.read_text(encoding="utf-8", errors="replace")
+        if "page=" not in html:  # fast prefilter before parsing
+            continue
+        scanned += 1
+        urls = extract_pagination_urls_from_html(html, str(row["canonical_url"]))
+        if urls:
+            added += queue_pagination_urls(
+                conn, urls, str(row["canonical_url"]), int(row["input_order"])
+            )
+    conn.close()
+    print(f"Scanned {scanned:,} listing capture(s) with pagination; queued {added:,} new page(s).")
+    print("Now run: uv run python scraper.py scrape   (deeper pages are found as it fetches)")
+    return 0
+
+
 def login(args: argparse.Namespace) -> int:
     p = paths(args.out)
     conn = init_db(p)
@@ -1227,6 +1367,7 @@ def build_parser() -> argparse.ArgumentParser:
     common_browser.add_argument("--block-media", action="store_true", help="Abort video/audio resource loads.")
 
     sub.add_parser("status").set_defaults(func=status)
+    sub.add_parser("discover").set_defaults(func=discover)
 
     login_parser = sub.add_parser("login", parents=[common_browser])
     login_parser.add_argument("--verify-url", default=None)
@@ -1262,6 +1403,11 @@ def build_parser() -> argparse.ArgumentParser:
     scrape_parser.add_argument("--backoff", type=float, default=30.0)
     scrape_parser.add_argument("--max-mhtml-mb", type=int, default=200)
     scrape_parser.add_argument("--retry-failed", action="store_true")
+    scrape_parser.add_argument(
+        "--no-pagination",
+        action="store_true",
+        help="Do not discover/queue paginated (?page=N) versions of listing pages.",
+    )
     scrape_parser.add_argument("--no-prompt-login", action="store_true")
     scrape_parser.add_argument("--no-gui-alert", action="store_true")
     scrape_parser.set_defaults(func=scrape)
