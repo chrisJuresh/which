@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Archive, ArrowLeft, ArrowRight, ExternalLink, FileText } from '@lucide/svelte';
+  import { Archive, ArrowLeft, ArrowRight, ExternalLink } from '@lucide/svelte';
   import { page as pageStore } from '$app/stores';
   import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
   import PageCard from '$lib/components/PageCard.svelte';
@@ -51,17 +51,14 @@
               <Archive size={18} /> Open archived page
             </a>
           {/if}
-          {#if entry.localMhtmlUrl}
-            <a class="btn" href={entry.localMhtmlUrl} target="_blank" rel="noreferrer noopener">
-              <FileText size={16} /> MHTML snapshot
-            </a>
-          {/if}
           <a class="btn" href={entry.url} target="_blank" rel="noreferrer noopener">
             <ExternalLink size={16} /> View live original
           </a>
         </div>
 
-        {#if entry.error}<div class="error-note">{entry.error}</div>{/if}
+        {#if entry.error && !entry.error.startsWith('MHTML capture failed')}
+          <div class="error-note">{entry.error}</div>
+        {/if}
 
         <dl class="meta">
           <div><dt>Status</dt><dd>{statusLabel(entry.status)}{entry.httpStatus ? ` (HTTP ${entry.httpStatus})` : ''}</dd></div>

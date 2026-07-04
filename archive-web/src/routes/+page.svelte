@@ -200,7 +200,7 @@
   .viewall:hover {
     background: rgba(11, 112, 111, 0.16);
   }
-  .viewall :global(svg) {
+  .viewall > :global(svg) {
     margin: 0 auto;
   }
   .viewall strong {

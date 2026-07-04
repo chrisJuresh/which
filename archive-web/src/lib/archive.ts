@@ -77,6 +77,30 @@ function buildIndex(data: ArchiveData): ArchiveIndex {
   };
   finish(root);
 
+  // Fold tiny top-level categories (<=2 archived pages) into one "Other" so the
+  // category grid/tree isn't cluttered with single-page sections. The originals
+  // stay reachable (nested under Other, still deep-linkable by their own id).
+  const MERGE_THRESHOLD = 2;
+  const small = root.children.filter((c) => (c.counts.downloaded ?? 0) <= MERGE_THRESHOLD);
+  if (small.length > 1) {
+    const big = root.children.filter((c) => (c.counts.downloaded ?? 0) > MERGE_THRESHOLD);
+    const pages = small.flatMap((c) => c.allPages).sort((a, b) => a.order - b.order);
+    const other: CategoryNode = {
+      id: '__other',
+      label: 'Other',
+      path: ['Other'],
+      children: [...small].sort((a, b) => a.label.localeCompare(b.label)),
+      pages: [],
+      allPages: pages,
+      counts: countStatuses(pages),
+      image: bestImage(pages)
+    };
+    root.children = [...big, other].sort(
+      (a, b) => (b.counts.downloaded ?? 0) - (a.counts.downloaded ?? 0)
+    );
+    nodeById.set('__other', other);
+  }
+
   return { data, root, nodeById, pageById, nodeIdByPageId };
 }
 
@@ -130,12 +154,38 @@ export function siblingsFor(
 
 export type ViewMode = 'all' | 'featured' | 'downloaded' | 'attention';
 
+/** A failed MHTML snapshot is not a real problem — the page downloaded fine. */
+function hasRealError(page: ArchivePage): boolean {
+  return Boolean(page.error) && !page.error.startsWith('MHTML capture failed');
+}
+
 export function matchesMode(page: ArchivePage, mode: ViewMode): boolean {
   if (mode === 'featured') return page.featured;
   if (mode === 'downloaded') return page.status === 'downloaded';
   if (mode === 'attention')
-    return page.status === 'failed' || page.status === 'in_progress' || Boolean(page.error);
+    return page.status === 'failed' || page.status === 'in_progress' || hasRealError(page);
   return true;
+}
+
+/**
+ * Relevance rank for a search hit: 0 = matched in the title (best), then
+ * category, description, type, URL, status. Lower is more relevant.
+ */
+export function searchRank(page: ArchivePage, value: string): number {
+  const needle = value.trim().toLowerCase();
+  if (!needle) return 0;
+  const fields = [
+    page.title,
+    page.categoryPath.join(' '),
+    page.description,
+    page.type,
+    page.url,
+    page.status
+  ];
+  for (let i = 0; i < fields.length; i++) {
+    if ((fields[i] ?? '').toLowerCase().includes(needle)) return i;
+  }
+  return fields.length; // matched somewhere odd; sort last
 }
 
 export function matchesQuery(page: ArchivePage, value: string): boolean {
@@ -162,10 +212,14 @@ export function filterPages(
 ): ArchivePage[] {
   const mode = opts.mode ?? 'all';
   const type = opts.type ?? 'All types';
-  const query = opts.query ?? '';
-  return pages
+  const query = (opts.query ?? '').trim();
+  const result = pages
     .filter((page) => matchesMode(page, mode))
     .filter((page) => type === 'All types' || page.type === type)
-    .filter((page) => matchesQuery(page, query))
-    .sort(pageSort);
+    .filter((page) => matchesQuery(page, query));
+  if (query) {
+    // Rank by where the query matched (title first), then the usual order.
+    return result.sort((a, b) => searchRank(a, query) - searchRank(b, query) || pageSort(a, b));
+  }
+  return result.sort(pageSort);
 }
