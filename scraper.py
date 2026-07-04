@@ -1313,10 +1313,16 @@ def discover(args: argparse.Namespace) -> int:
         capture = p.out / str(row["raw_html_path"])
         if not capture.exists():
             continue
-        html = capture.read_text(encoding="utf-8", errors="replace")
-        if "page=" not in html:  # fast prefilter before parsing
+        try:
+            data = capture.read_bytes()
+        except OSError:
+            continue  # skip a transiently-locked/unreadable capture
+        # Prefilter on raw bytes (no decode) — only real ?page=N listings pay the
+        # cost of UTF-8 decoding + HTML parsing.
+        if not re.search(rb"[?&]page=[0-9]", data):
             continue
         scanned += 1
+        html = data.decode("utf-8", "replace")
         urls = extract_pagination_urls_from_html(html, str(row["canonical_url"]))
         if urls:
             added += queue_pagination_urls(
