@@ -1,0 +1,50 @@
+name: which
+
+services:
+  # Static origin: the built SPA (from the image) + the archive data/captures
+  # bind-mounted from the host. Reached only via the Cloudflare Tunnel and a
+  # loopback port for local health checks.
+  web:
+    image: ghcr.io/chrisjuresh/which:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - /srv/which/data:/site/data:ro
+      - /srv/which/captures:/site/captures:ro
+    ports:
+      - "127.0.0.1:8099:80"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.scope=which"
+    networks: [which]
+
+  # Public access with no open inbound ports and no exposed home IP.
+  # TUNNEL_TOKEN comes from deploy/.env (see .env.example).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    depends_on: [web]
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.scope=which"
+    networks: [which]
+
+  # Auto-pulls new images pushed by CI. Scoped so it only touches this stack,
+  # never the rest of the homelab (jellyfin, scrutiny, ...).
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    command: --interval 120 --cleanup --scope which --label-enable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      - "com.centurylinklabs.watchtower.scope=which"
+    networks: [which]
+
+networks:
+  which:

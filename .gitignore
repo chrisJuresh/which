@@ -17,6 +17,9 @@ archive-web/build/
 archive-web/node_modules/
 archive-web/preview*.log
 
+# --- Deploy secrets ---
+deploy/.env
+
 # --- Local tooling / editor / OS ---
 .claude/
 *.partial

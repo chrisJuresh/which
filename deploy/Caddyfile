@@ -1,0 +1,22 @@
+# Origin server for the Which archive. TLS/edge is handled by Cloudflare
+# (the Tunnel connects to this over the internal Docker network), so this
+# listens on plain HTTP inside the container only.
+:80 {
+	root * /site
+	encode zstd gzip
+
+	# Hashed SvelteKit assets never change — cache them hard.
+	@immutable path /_app/immutable/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# SPA: serve real files (captures, data, assets) if present, else the app
+	# shell so the client router can handle /browse, /page/*, /search, /guides.
+	try_files {path} /index.html
+	file_server
+}

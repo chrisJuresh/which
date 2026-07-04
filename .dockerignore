@@ -1,0 +1,9 @@
+.git
+.venv
+scraped/
+**/node_modules
+archive-web/build
+archive-web/.svelte-kit
+archive-web/static/captures
+archive-web/static/data
+*.log
