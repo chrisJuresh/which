@@ -93,7 +93,9 @@ function buildIndex(data: ArchiveData): ArchiveIndex {
       pages: [],
       allPages: pages,
       counts: countStatuses(pages),
-      image: bestImage(pages)
+      // Prefer Travel's photo for the tile — the generic pick grabbed a
+      // QR/document thumbnail from Policy And Insight.
+      image: small.find((c) => c.label === 'Travel' && c.image)?.image ?? bestImage(pages)
     };
     root.children = [...big, other].sort(
       (a, b) => (b.counts.downloaded ?? 0) - (a.counts.downloaded ?? 0)
