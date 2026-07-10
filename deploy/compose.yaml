@@ -18,7 +18,7 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.scope=which"
-    networks: [which]
+    networks: [a3server]
 
   # Public access with no open inbound ports and no exposed home IP.
   # TUNNEL_TOKEN comes from deploy/.env (see .env.example).
@@ -32,7 +32,7 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "com.centurylinklabs.watchtower.scope=which"
-    networks: [which]
+    networks: [a3server]
 
   # Auto-pulls new images pushed by CI. Scoped so it only touches this stack,
   # never the rest of the homelab (jellyfin, scrutiny, ...).
@@ -46,7 +46,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
       - "com.centurylinklabs.watchtower.scope=which"
-    networks: [which]
+    networks: [a3server]
 
+# Shared edge network for the a3server homelab: this project's cloudflared is
+# the single tunnel, and every origin it serves (which, films, ...) attaches
+# here. Create once with:  docker network create a3server
 networks:
-  which:
+  a3server:
+    external: true
