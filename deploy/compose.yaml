@@ -2,9 +2,11 @@ name: which
 
 services:
   # Static origin: the built SPA (from the image) + the archive data/captures
-  # bind-mounted from the host. Reached only via the Cloudflare Tunnel and a
-  # loopback port for local health checks.
+  # bind-mounted from the host. Reached only via the shared Cloudflare Tunnel
+  # (see ~/infra) and a loopback port for local health checks. The single
+  # tunnel + Watchtower now live in the `infra` project, not here.
   web:
+    container_name: which
     image: ghcr.io/chrisjuresh/which:latest
     build:
       context: ..
@@ -17,40 +19,11 @@ services:
       - "127.0.0.1:8099:80"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-      - "com.centurylinklabs.watchtower.scope=which"
-    networks: [a3server]
+    networks:
+      a3server:
+        # ingress target is http://web:80; 'which' also resolves (consistent name)
+        aliases: [which, web]
 
-  # Public access with no open inbound ports and no exposed home IP.
-  # TUNNEL_TOKEN comes from deploy/.env (see .env.example).
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
-    depends_on: [web]
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-      - "com.centurylinklabs.watchtower.scope=which"
-    networks: [a3server]
-
-  # Auto-pulls new images pushed by CI. Scoped so it only touches this stack,
-  # never the rest of the homelab (jellyfin, scrutiny, ...).
-  watchtower:
-    # containrrr/watchtower is unmaintained and its Docker API client (1.25) is
-    # too old for Docker 29 (needs >=1.44); use the maintained fork.
-    image: nickfedor/watchtower:latest
-    restart: unless-stopped
-    command: --interval 120 --cleanup --scope which --label-enable
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    labels:
-      - "com.centurylinklabs.watchtower.scope=which"
-    networks: [a3server]
-
-# Shared edge network for the a3server homelab: this project's cloudflared is
-# the single tunnel, and every origin it serves (which, films, ...) attaches
-# here. Create once with:  docker network create a3server
 networks:
   a3server:
     external: true
