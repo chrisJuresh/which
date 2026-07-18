@@ -48,8 +48,8 @@ WSL) the streamed pipe is fine:
 ```bash
 uv run python export_archive_data.py
 tar czf - -C archive-web/static/captures raw-html | \
-  ssh -p 22222 chris@REDACTED-IP 'tar xzf - -C /srv/which/captures'
-scp -P 22222 archive-web/static/data/archive.json chris@REDACTED-IP:/srv/which/data/
+  ssh -p 22222 chris@<server> 'tar xzf - -C /srv/which/captures'
+scp -P 22222 archive-web/static/data/archive.json chris@<server>:/srv/which/data/
 ```
 
 The site picks up new data immediately (bind-mounted, read at request time).

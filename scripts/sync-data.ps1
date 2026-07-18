@@ -18,11 +18,15 @@
 param(
   [switch]$SkipExport,
   [string]$RemoteUser = 'chris',
-  [string]$RemoteHost = 'REDACTED-IP',
+  [string]$RemoteHost = $env:WHICH_HOST,
   [int]$Port = 22222
 )
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $RemoteHost) {
+  throw 'Set the deploy host: pass -RemoteHost <addr> or set $env:WHICH_HOST.'
+}
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $remote = "$RemoteUser@$RemoteHost"
