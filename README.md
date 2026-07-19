@@ -1,227 +1,165 @@
-# Which Archive
+# Which? Archive
 
-A personal, self-hosted archive of Which pages, in three stages:
+[![Container build](https://github.com/chrisJuresh/which/actions/workflows/deploy.yml/badge.svg)](https://github.com/chrisJuresh/which/actions/workflows/deploy.yml)
 
-1. **`scraper.py`** captures raw pages listed in `which.csv` using a logged-in
-   browser session, storing everything under `scraped/`.
-2. **`export_archive_data.py`** builds the browsable dataset **and runs the
-   link-rewrite pipeline**: inside every captured page, links to pages that were
-   *also* scraped are pointed at the local copy, while links to pages that were
-   *not* scraped stay as their real, live Which URLs.
-3. **`archive-web/`** is a SvelteKit app for browsing the result — categories,
-   search, page details, and one-click opening of captured pages.
+A personal offline archive of [Which?](https://www.which.co.uk) pages: a resumable Playwright scraper, a link-rewriting publish pipeline, and a SvelteKit browser for the captured collection.
 
-The scraper never rewrites anything. Raw capture stays raw; the rewrite happens
-only on the published copies under `archive-web/static/captures/`.
+Which? is a subscription service, and articles change or disappear over time. This project keeps a private, browsable snapshot of the pages a subscriber cares about — captured with their own logged-in session, stored locally, and viewable through a fast catalogue UI where every internal link keeps working: links to archived pages open the local copy, links to anything else fall through to the live site.
 
-> Captured pages are Which subscriber content. They live under `scraped/` and
-> `archive-web/static/captures/`, both of which are git-ignored and never
-> committed. Keep the archive private.
+The reference instance archives **8,543 pages** (review hubs, best-buy and buying guides, product hubs and more) with a 100% capture rate, and runs on a home server behind a Cloudflare Tunnel with CI-built images auto-deployed from this repo.
 
----
+> **Note**: this is a personal-use archival tool — keep the archive private. Captured content is never committed to this repository (see `.gitignore`), and the scraper is deliberately polite: it paces itself, honours `Retry-After`, and stops on HTTP 429 rather than pushing through.
 
-## Quick start — view the website
+## How it works
 
-**Just double-click `Start Which Archive.bat`.** It installs anything missing,
-builds the data on the first run, and opens the site at
-<http://localhost:5173>. Keep the window open while you browse; close it (or
-press Ctrl+C) to stop.
-
-After a **new scrape**, double-click **`Refresh Data and Start.bat`** instead —
-it rebuilds the data and rewrites captures first, then opens the site.
-
-Prefer the terminal? From the project root in PowerShell:
-
-```powershell
-./scripts/run-site.ps1            # start (exports data only if missing)
-./scripts/run-site.ps1 -Refresh   # rebuild data after a scrape, then start
+```mermaid
+flowchart LR
+    subgraph Harvest
+        SM[sitemap_tree.py<br/>walk Which sitemap indexes] --> CSV[which.csv<br/>URL catalogue]
+    end
+    subgraph Scrape
+        CSV --> SC[scraper.py<br/>Playwright + Chrome]
+        SC --> DB[(manifest.sqlite<br/>status / attempts / errors)]
+        SC --> RAW[raw HTML + MHTML<br/>+ JSON sidecars]
+        SC -- discovers ?page=N series --> SC
+    end
+    subgraph Publish
+        DB --> EX[export_archive_data.py]
+        RAW --> EX
+        EX --> AJ[archive.json<br/>catalogue + metadata]
+        EX --> CAP[captures/<br/>links rewritten, scripts stripped,<br/>banner injected]
+    end
+    subgraph Serve
+        AJ --> WEB[archive-web<br/>SvelteKit SPA]
+        CAP --> WEB
+        WEB --> DOCKER[Caddy image via GitHub Actions -> GHCR]
+        DOCKER --> HOME[home server<br/>Watchtower + Cloudflare Tunnel]
+    end
 ```
 
-See [Manual setup](#manual-setup) for the step-by-step.
+Three stages, three tools:
 
----
+1. **Scrape** (`scraper.py`) — works through the URL list in a SQLite manifest, driving a real Chrome profile via Playwright. Every page is captured twice: the fully rendered HTML and an MHTML snapshot (via CDP `Page.captureSnapshot`). Every capture is recorded with status, HTTP code, timestamps and file paths, so a run can be stopped and resumed at any point.
+2. **Publish** (`export_archive_data.py`) — builds `archive.json` (title, description, image, category and page type for every URL, extracted with lxml) and copies captures into the web app's static tree after rewriting them. Anchors that point at an archived page are rewritten to the local copy; other Which? links become absolute live URLs; external links are left alone. `<script>` tags are stripped so the captured React pages stay frozen instead of re-running and 404-ing, and a slim banner is injected linking each capture back to its live original.
+3. **Browse** (`archive-web/`) — a static SvelteKit SPA over `archive.json`: dashboard with archive stats, category grid and tree, relevance-ranked search across all pages, a best-and-buying-guides view, and a detail page per capture with prev/next navigation and related pages.
 
-## What the website gives you
+## Features
 
-- **Home** — headline stats, top-level categories, best/buying guides, and the
-  most recently captured pages.
-- **Browse** (`/browse/...`) — a collapsible category tree plus deep-linkable
-  category pages with breadcrumbs, sub-sections, filters and search.
-- **Page detail** (`/page/<id>`) — metadata, capture status, previous/next
-  within the category, related pages, and buttons to open the archived copy,
-  the MHTML snapshot, or the live original.
-- **Search** (`/search?q=...`) — filter across every page by title, URL,
-  category, type or status.
+**Scraper**
+- **Resumable by design** — SQLite manifest (WAL) tracks every URL; interrupted runs recover automatically, Ctrl+C leaves the current page pending.
+- **Session-aware** — verifies the logged-in session before every page; detects login walls, CAPTCHAs and "sign in to unlock" prompts by checking what is actually *visible* on the page, then pauses with a desktop alert and lets you sign back in without losing the run. Only the *names* of the session cookies it verifies are recorded — never values or passwords (the login itself lives in the dedicated browser profile).
+- **Failure triage** — distinguishes a broken URL from a broken session (redirect-loop probing), a transient server error (bounded exponential backoff) from rate limiting (parses `Retry-After`, stops the run safely).
+- **Polite pacing** — targets a seconds-per-page budget (default 5 s, load time included), or spreads the whole pending set over `--target-hours`; prints per-page timing, run average and ETA.
+- **Pagination discovery** — finds `?page=N` listing series from the links a first page actually renders, enumerates the bounded range (capped), and never chains from paginated pages — so a windowed pager that always shows a "next" link cannot cause a runaway crawl. A `discover` subcommand backfills series from captures made before this feature existed.
 
-Every archived page also carries a slim bar at the top linking back to the
-archive home and out to the live original.
+**Publish pipeline**
+- **Self-contained mirror** — tri-state link rewriting (local / live / untouched external) with fragments preserved.
+- **Frozen captures** — script stripping keeps rendered React snapshots intact; originals on disk stay pristine (rewriting happens at publish time).
+- **Fast re-exports** — metadata parse cache keyed by file signature, capture-map signature to skip unnecessary rewrite passes, hardlink publishing for unchanged files, atomic writes with retry against transient Windows file locks.
 
----
+**Web app**
+- Category tree derived from URL structure, with per-category archived/pending/failed counts.
+- Search across titles, descriptions, categories, types and URLs, ranked by where the match occurred.
+- Page types (Best guide, Buying guide, Review hub, How we test, …) and a featured-guides view.
+- Incremental list rendering, deep-linkable search and category routes, graceful "no data yet" state.
 
-## Manual setup
+## Quick start
 
-```powershell
-cd C:\Users\Chris\Desktop\which
+Prerequisites: [uv](https://docs.astral.sh/uv/), Node 18+, and Google Chrome — the scraper drives your installed Chrome by default. `--channel msedge` uses Edge instead, and `--channel chromium` uses Playwright's bundled browser (install it once with `uv run playwright install chromium`).
+
+**Windows, one click**: double-click `Start Which Archive.bat` — it creates the venv, installs Python and npm dependencies, exports the data if needed, and opens the site at `http://localhost:5173`. Use `Refresh Data and Start.bat` after a new scrape.
+
+**Any platform, by hand:**
+
+```bash
 uv venv
 uv pip install -r requirements.txt
-uv run playwright install chromium
+
+# 1. Sign in once (opens a dedicated Chrome profile; verify a subscriber page)
+uv run python scraper.py login
+
+# 2. Scrape (resumable; re-run any time)
+uv run python scraper.py scrape
+
+# 3. Export the catalogue + rewritten captures, then serve the UI
 cd archive-web
 npm install
-cd ..
+npm run dev        # runs the export first, then vite dev
 ```
 
-If Chrome or Edge is already installed, the bundled Chromium install is
-optional. The default scraper channel is Chrome; use `--channel msedge` for Edge
-or `--channel chromium` for Playwright's bundled browser.
+`which.csv` (the URL catalogue) ships in the repo; regenerate or extend it from Which?'s own sitemaps with `uv run python sitemap_tree.py`.
 
----
+## Scraper commands
 
-## 1. Scrape raw pages
-
-Log in first:
-
-```powershell
-uv run python scraper.py login
+```
+uv run python scraper.py <command> [--csv which.csv] [--out scraped]
 ```
 
-This opens a dedicated browser profile under `scraped/browser-profile`. Sign in
-yourself, open a subscriber page that shows the full content, then press Enter in
-the terminal. The scraper stores only the *names* of the session cookies it
-expects to remain present, never cookie values or passwords.
+| Command | What it does |
+|---|---|
+| `login` | Opens the dedicated browser profile, waits for you to sign in, records which session cookies matter and verifies them. |
+| `scrape` | Works through pending URLs. Key flags: `--target-seconds` (default 5), `--target-hours`, `--delay`/`--jitter`, `--limit`, `--retries`, `--retry-failed`, `--block-media`, `--no-pagination`, `--max-mhtml-mb`. |
+| `status` | Manifest totals by status, plus the next pending URL and its last error. |
+| `discover` | Offline backfill: scans downloaded listing captures for `?page=N` series and queues them. |
+| `reset --failed` / `reset --url <url>` | Requeue failed pages, or one specific page. |
+| `clear-session` | Wipes the dedicated browser session (cookies, storage, login marker) — captures and progress are untouched. |
 
-Resume scraping:
+Captures land in `scraped/`: `raw-html/` and `mhtml/` (sharded by slug prefix), `meta/` JSON sidecars, and `manifest.sqlite`. Removing a URL from the CSV never deletes its captures — the manifest import is strictly additive.
 
-```powershell
-uv run python scraper.py scrape
+If Chrome ever shows `ERR_TOO_MANY_REDIRECTS`, the dedicated scraper session is broken: run `clear-session`, then `login`, then `scrape` — captures and progress are untouched.
+
+## Export options
+
+```
+uv run python export_archive_data.py [--no-rewrite] [--no-banner] [--keep-scripts] [--force-rewrite]
 ```
 
-The scraper:
+By default captures are link-rewritten, script-stripped and banner-injected into `archive-web/static/captures/`, and the catalogue is written to `archive-web/static/data/archive.json`. The flags publish verbatim copies, skip the banner, keep scripts, or force a full rewrite pass.
 
-- imports all URLs from `which.csv`
-- stores resume state in `scraped/manifest.sqlite`
-- resets interrupted `in_progress` rows back to `pending`
-- checks login cookies before every page
-- checks the loaded page for login, CAPTCHA, and access-block markers
-- stops on 401, 403, 429, external hosts, and repeated navigation/server failures
-- respects `Retry-After` when present
-- targets about 5 seconds per page by default, and only waits when running ahead
-- saves raw rendered HTML for each page and attempts an MHTML snapshot for fidelity
-- **discovers pagination**: when a listing links to `?page=2`, `?page=3`, … those
-  pages are queued and captured too (chained until the whole series is covered),
-  tagged `source=pagination` so they survive `which.csv` changes
+## Project structure
 
-### Paginated listings
-
-Which paginates listings with a `?page=N` query parameter. New scrapes pick these
-up automatically. To backfill pagination for pages captured **before** this
-support existed, run the one-time discovery pass (offline, no re-fetch), then scrape:
-
-```powershell
-uv run python scraper.py discover   # queues ?page=N versions from existing captures
-uv run python scraper.py scrape     # fetches them; deeper pages are found as it goes
+```
+scraper.py                  Resumable Playwright scraper (login, scrape, status, discover, reset)
+export_archive_data.py      Catalogue export + link-rewrite/publish pipeline
+sitemap_tree.py             Walks Which? sitemap indexes into a tree + flat URL CSV
+sitemap.py                  Earlier flat sitemap-to-CSV script
+which.csv                   URL catalogue driving the scrape (8,543 URLs)
+which_active_urls_only.csv  Full sitemap harvest (~19,600 URLs)
+archive-web/                SvelteKit SPA (static adapter, client-side rendering)
+  src/lib/archive.ts        Loads archive.json, builds category tree/search index
+  src/routes/               Dashboard, /browse, /search, /guides, /page/[id]
+deploy/                     Dockerfile (Node build -> Caddy), compose.yaml, Caddyfile
+scripts/run-site.ps1        One-command local bootstrap (used by the .bat launchers)
+scripts/sync-data.ps1       Pushes captures + archive.json to the server over ssh/scp
+.github/workflows/deploy.yml  Builds and publishes the site image to GHCR on push
 ```
 
-Use `scrape --no-pagination` to disable discovery for a run.
+## Deployment
 
-If the login expires mid-run, the current URL stays pending and the scraper
-alerts loudly (terminal bell, banner, `scraped/LOGIN_REQUIRED.txt`, and a
-Windows message box), then prompts you to sign in again. Other safe stops (rate
-limits, repeated navigation failures, genuinely external hosts) use the same
-alert path and write `scraped/SCRAPER_STOPPED.txt`. Use `--no-gui-alert` for a
-terminal-only alert.
+The reference instance runs privately at **which.chrisj.uk** (SSO-gated with Cloudflare Access) on a home server:
 
-Some Which URLs redirect to Which-owned content subdomains (e.g.
-`broadband.which.co.uk`); those are captured as raw pages. The scraper still
-stops before auth pages or non-Which hosts.
+- **Image**: multi-stage Docker build — `node:20-alpine` builds the SPA, `caddy:2-alpine` serves it with SPA fallback, compression, immutable caching for hashed assets and hardened headers.
+- **Data stays out of the image**: `archive.json` and the captures are bind-mounted read-only, so publishing new content is a data sync (`scripts/sync-data.ps1`), not a rebuild.
+- **CI/CD**: every push to `main` that touches the web app or deploy files builds and pushes `ghcr.io/chrisjuresh/which:latest` using only the built-in `GITHUB_TOKEN`; Watchtower on the server pulls it within ~2 minutes.
+- **Networking**: exposed exclusively through a Cloudflare Tunnel — no inbound ports on the home network, TLS at Cloudflare's edge, Cloudflare Access SSO in front. The tunnel and Watchtower are the shared [infra](https://github.com/chrisJuresh/infra) stack.
 
-If Chrome shows `ERR_TOO_MANY_REDIRECTS`, clear only the dedicated scraper
-session and sign in again — this does **not** delete captured pages or state:
+See [`deploy/README.md`](deploy/README.md) for the compose stack and first-time setup.
 
-```powershell
-uv run python scraper.py clear-session
-uv run python scraper.py login
-uv run python scraper.py scrape
-```
+<!-- screenshot: homepage dashboard showing 8,543 archived pages, category grid and stat tiles -->
+<!-- screenshot: an archived Which? page with the teal "Which Archive" banner and local links -->
 
-## 2. Build data + rewrite links
+## Tech stack
 
-```powershell
-uv run python export_archive_data.py
-```
+- **Scraper/pipeline**: Python 3, Playwright (Chromium/CDP), lxml, SQLite, uv
+- **Web**: SvelteKit 2 (Svelte 5), TypeScript, Vite, static adapter (pure client-side SPA), Lucide icons
+- **Ops**: Docker (multi-stage), Caddy, Docker Compose, GitHub Actions, GHCR, Watchtower, Cloudflare Tunnel
+- **Windows tooling**: PowerShell bootstrap/sync scripts, double-click `.bat` launchers
 
-This reads `which.csv` and `scraped/manifest.sqlite`, writes
-`archive-web/static/data/archive.json`, and publishes each capture into
-`archive-web/static/captures/` with its links rewritten:
+## Status and limitations
 
-- **Scraped → local.** A link whose target was also scraped is repointed at that
-  target's local capture, so browsing stays inside the archive.
-- **Unscraped Which → live.** A link to a Which page that was *not* scraped is
-  resolved to its absolute, live `https://www.which.co.uk/...` URL (root-relative
-  `/foo` and protocol-relative `//host/foo` links are made absolute so they never
-  resolve against the local server).
-- **External → untouched.** Non-Which links are left exactly as they are.
+Personal project, built and deployed in July 2026; the archive it serves is complete (100% of the catalogue captured) and the stack is in maintenance mode.
 
-Captures are fully-rendered React pages, so their `<script>` tags are dropped
-during publishing. Otherwise the page's own JavaScript re-runs against
-`localhost`, fails to route, and replaces the captured content with a 404
-(also wiping the rewritten links). Removing scripts freezes each capture as a
-static snapshot that displays its content and keeps the rewritten links working.
-
-A rewrite depends on the whole set of scraped URLs, so a full re-pass runs
-automatically whenever that set changes; otherwise only new/changed captures are
-re-published. Useful flags:
-
-| Flag | Effect |
-| --- | --- |
-| `--force-rewrite` | Rewrite every capture even if nothing changed. |
-| `--no-rewrite` | Publish captures verbatim (no link changes, no banner). |
-| `--no-banner` | Rewrite links but skip the top archive bar. |
-| `--keep-scripts` | Keep `<script>` tags (captures will re-run and usually 404). |
-
-## 3. Browse the archive
-
-```powershell
-cd archive-web
-npm run dev      # exports data first, then starts the dev server
-```
-
-Production build (also refreshes data first):
-
-```powershell
-cd archive-web
-npm run build
-npm run preview
-```
-
-The app is a static, client-rendered SvelteKit SPA (`adapter-static`) that reads
-`static/data/archive.json` at runtime, so the same build works whether it is
-served locally or from a private server later.
-
----
-
-## Status and recovery
-
-```powershell
-uv run python scraper.py status
-uv run python scraper.py reset --failed
-uv run python scraper.py reset --url https://www.which.co.uk/example
-```
-
-## On-disk layout
-
-```text
-which/
-  scraper.py                 raw page capture (stage 1)
-  export_archive_data.py     dataset + link-rewrite pipeline (stage 2)
-  sitemap.py / sitemap_tree.py   build the URL lists from Which sitemaps
-  which.csv                  the list of URLs to scrape
-  which_active_urls_only.csv full flat list of active Which URLs
-  scripts/run-site.ps1       one command to bring the website up
-  archive-web/               SvelteKit browser (stage 3)
-  scraped/                   (git-ignored) raw captures, DB, browser profile
-    browser-profile/         dedicated logged-in browser profile
-    manifest.sqlite          resume/status database
-    raw-html/                rendered DOM snapshots (the archive source)
-    mhtml/                   browser MHTML snapshots for fidelity
-    meta/                    per-page metadata sidecars
-```
+- The scraper requires an active Which? subscription and an interactive first login; it deliberately has no headless/credential-based auth.
+- Captures freeze the page as rendered — interactive widgets inside articles will not function (scripts are stripped by design; MHTML snapshots are kept for full fidelity).
+- The catalogue CSV, category rules and page-type heuristics are Which?-specific; pointing the system at another site would need adaptation.
+- Archived content is for personal use. Respect Which?'s terms of use — this repo contains the tooling only, never the content.
